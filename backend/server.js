@@ -45,7 +45,7 @@ async function connectWithRetry(retries = 10, delayMs = 2000) {
 // Health check — used by orchestrator/ALB health checks and CI smoke tests
 app.get('/health', async (req, res) => {
   try {
-    await pool.query('SELECT 1');
+    await pool.query('SELECT 1'); 
     res.status(200).json({ status: 'ok' });
   } catch (err) {
     res.status(503).json({ status: 'error', error: err.message });
