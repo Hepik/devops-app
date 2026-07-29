@@ -1,0 +1,92 @@
+name: Backend CI/CD (ECS)
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'backend/**'
+      - '.github/workflows/backend-ecs.yml'
+
+permissions:
+  contents: read
+
+env:
+  AWS_REGION: eu-central-1
+  ECR_REPOSITORY: devops-task-backend
+  ECS_CLUSTER: devops-task-cluster
+  ECS_SERVICE: devops-task-backend
+  ECS_TASK_FAMILY: devops-task-backend
+  CONTAINER_NAME: backend
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: vars
+        run: echo "sha_short=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - id: ecr-login
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # Broken Dockerfile/build fails here -> nothing further runs -> no deploy.
+      - name: Build and push image
+        env:
+          REGISTRY: ${{ steps.ecr-login.outputs.registry }}
+          TAG: ${{ steps.vars.outputs.sha_short }}
+        run: |
+          docker build -t "$REGISTRY/$ECR_REPOSITORY:$TAG" ./backend
+          docker push "$REGISTRY/$ECR_REPOSITORY:$TAG"
+
+      # Take the CURRENTLY RUNNING task definition (whatever Terraform or a
+      # previous CI run left in place), patch only the image, and register
+      # that as a new revision. This is what keeps the rest of the task
+      # definition (cpu/memory/secrets/roles) exactly as Terraform defined
+      # it, changing only the one field CI owns.
+      - name: Render new task definition
+        env:
+          REGISTRY: ${{ steps.ecr-login.outputs.registry }}
+          TAG: ${{ steps.vars.outputs.sha_short }}
+        run: |
+          aws ecs describe-task-definition \
+            --task-definition "$ECS_TASK_FAMILY" \
+            --query 'taskDefinition' > task-def.json
+
+          jq --arg IMAGE "$REGISTRY/$ECR_REPOSITORY:$TAG" \
+             '.containerDefinitions[0].image = $IMAGE
+              | del(.taskDefinitionArn, .revision, .status, .requiresAttributes,
+                    .compatibilities, .registeredAt, .registeredBy)' \
+             task-def.json > new-task-def.json
+
+      - name: Register new task definition revision
+        id: register
+        run: |
+          NEW_ARN=$(aws ecs register-task-definition \
+            --cli-input-json file://new-task-def.json \
+            --query 'taskDefinition.taskDefinitionArn' --output text)
+          echo "task_def_arn=$NEW_ARN" >> "$GITHUB_OUTPUT"
+
+      - name: Deploy new revision to the service
+        run: |
+          aws ecs update-service \
+            --cluster "$ECS_CLUSTER" \
+            --service "$ECS_SERVICE" \
+            --task-definition "${{ steps.register.outputs.task_def_arn }}" \
+            --force-new-deployment
+
+      # This is the smoke test: waits until the new tasks are running AND
+      # passing the ALB health check. If they never go healthy, this times
+      # out and fails the job — the broken version stays registered but
+      # the workflow (and therefore the deploy signal) is red.
+      - name: Wait for service to stabilize
+        run: |
+          aws ecs wait services-stable \
+            --cluster "$ECS_CLUSTER" \
+            --services "$ECS_SERVICE"
