@@ -4,16 +4,22 @@ const { Pool } = require('pg');
 
 const PORT = process.env.PORT || 5000;
 
-// DATABASE_URL is the single source of DB config (comes from env / secrets manager in prod)
+// Local Postgres (docker-compose) doesn't have SSL configured — RDS does,
+// and actually REJECTS unencrypted connections by default. DB_SSL is set
+// to "true" only in the ECS task definition (infra/ecs.tf), never in
+// docker-compose.yml, so this stays off for local dev automatically.
+// rejectUnauthorized: false skips validating RDS's certificate chain —
+// fine for a learning project; a stricter setup would bundle AWS's RDS
+// CA certificate and verify against it instead.
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
+  ssl: process.env.DB_SSL === 'true' ? { rejectUnauthorized: false } : false,
 });
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-// --- DB bootstrap -----------------------------------------------------
 async function ensureSchema() {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS items (
@@ -24,7 +30,6 @@ async function ensureSchema() {
   `);
 }
 
-// Retry DB connection on startup — the DB container may not be ready yet
 async function connectWithRetry(retries = 10, delayMs = 2000) {
   for (let i = 1; i <= retries; i++) {
     try {
@@ -40,19 +45,15 @@ async function connectWithRetry(retries = 10, delayMs = 2000) {
   throw new Error('Could not connect to database after retries');
 }
 
-// --- Routes -------------------------------------------------------------
-
-// Health check — used by orchestrator/ALB health checks and CI smoke tests
 app.get('/health', async (req, res) => {
   try {
-    await pool.query('SELECT 1'); 
+    await pool.query('SELECT 1');
     res.status(200).json({ status: 'ok' });
   } catch (err) {
     res.status(503).json({ status: 'error', error: err.message });
   }
 });
 
-// Alias under /api/ so the frontend can reach it through the same nginx proxy prefix
 app.get('/api/health', async (req, res) => {
   try {
     await pool.query('SELECT 1');
@@ -62,7 +63,6 @@ app.get('/api/health', async (req, res) => {
   }
 });
 
-// Demo endpoint proving frontend <-> backend <-> DB wiring works
 app.get('/api/items', async (req, res) => {
   try {
     const result = await pool.query('SELECT id, name, created_at FROM items ORDER BY id DESC LIMIT 50');

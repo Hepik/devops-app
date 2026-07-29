@@ -42,7 +42,8 @@ resource "aws_ecs_task_definition" "backend" {
       ]
 
       environment = [
-        { name = "PORT", value = "5000" }
+        { name = "PORT", value = "5000" },
+        { name = "DB_SSL", value = "true" } # RDS rejects unencrypted connections; see backend/server.js
       ]
 
       # Resolved from Secrets Manager by the EXECUTION role at container
