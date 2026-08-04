@@ -9,6 +9,7 @@ on:
 
 permissions:
   contents: read
+  id-token: write # required for OIDC — lets this workflow request a token to assume the AWS role
 
 env:
   AWS_REGION: eu-central-1
@@ -29,8 +30,7 @@ jobs:
 
       - uses: aws-actions/configure-aws-credentials@v4
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          role-to-assume: arn:aws:iam::095339215346:role/devops-task-github-actions
           aws-region: ${{ env.AWS_REGION }}
 
       - id: ecr-login

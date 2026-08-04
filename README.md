@@ -1,149 +1,164 @@
-# DevOps Task — Крок 1: застосунок локально через Docker Compose
+# DevOps Task
 
-Демо-застосунок: React-фронтенд + Node.js/Express-бекенд + PostgreSQL.
-Це перший крок навчального завдання (CI/CD → EC2 → Terraform → ECS →
-секрети/моніторинг). Тут — лише локальний запуск через Docker Compose.
+## Крок 1 — застосунок локально (Docker Compose)
 
-## Структура
-
-```
-.
-├── backend/          # Express API, /health, /api/items, підключення до Postgres
-│   ├── server.js
-│   ├── Dockerfile    # multi-stage: build → alpine runtime
-│   └── package.json
-├── frontend/         # React (Vite), збирається у статику, роздається через nginx
-│   ├── src/
-│   ├── nginx.conf    # проксі /api/ -> backend:5000
-│   ├── Dockerfile    # multi-stage: node build → nginx runtime
-│   └── package.json
-├── docker-compose.yml
-└── .env.example
-```
-
-## Запуск локально
-
-1. Скопіювати змінні середовища:
-   ```bash
-   cp .env.example .env
-   ```
-2. Підняти все одним стеком:
-   ```bash
-   docker compose up --build
-   ```
-3. Відкрити:
-   - Фронтенд: http://localhost:3000
-   - Бекенд напряму: http://localhost:5000/health
-   - API: http://localhost:5000/api/items
-
-Фронтенд у продакшн-збірці ходить у бекенд через nginx-проксі `/api/` →
-`http://backend:5000/api/` (ім'я сервіса в docker-compose мережі). У режимі
-`npm run dev` (без Docker) той самий шлях проксіюється через Vite dev-server
-(`vite.config.js`).
-
-## Як влаштовано
-
-- **backend/server.js** — Express-сервер. На старті чекає на готовність БД
-  (retry з таймаутом), створює таблицю `items`, якщо її нема. Ендпоінти:
-  - `GET /health`, `GET /api/health` — healthcheck (200, якщо є з'єднання з БД)
-  - `GET /api/items` — список записів
-  - `POST /api/items` — додати запис
-- **frontend/** — React SPA, при завантаженні тягне `/api/items` і показує
-  健health бекенду. Це демонструє реальний зв'язок фронт → бек → БД, а не
-  заглушку.
-- **Dockerfile-и обох сервісів** — multi-stage: стадія збірки з повним
-  тулчейном (npm install/build) окремо від рантайм-стадії (мінімальний
-  alpine/nginx-образ, без dev-залежностей і компіляторів).
-
-## Відкат / rollback (локально)
-
-Оскільки образи будуть тегуватись git-sha/semver (на наступних кроках,
-у CI), відкат — це запуск попереднього тега:
+React-фронтенд + Node.js/Express-бекенд + PostgreSQL.
 
 ```bash
-docker compose down
-# змінити тег образу в docker-compose.yml (або override-файлі) на попередній
-docker compose up -d
+cp .env.example .env
+docker compose up --build
 ```
+- Фронтенд: http://localhost:3000
+- Бекенд: http://localhost:5000/health, http://localhost:5000/api/items
 
-## Знесення
+backend/server.js: retry-підключення до БД на старті, `GET/POST /api/items`,
+`GET /health` + `/api/health` (перевіряє реальне з'єднання з БД, не просто
+"процес живий"). Dockerfile-и обох сервісів — multi-stage (build stage з
+toolchain окремо від легкого runtime).
+
+## Крок 2 — CI/CD → EC2 (замінено Кроком 4, файли видалені)
+
+Був окремий пайплайн через SSH на EC2 (ghcr.io, `docker compose`). Після
+переходу на ECS (Крок 3/4) `backend.yml`/`frontend.yml` видалені — ECS
+лишається єдиним активним варіантом деплою, щоб не тригерити два пайплайни
+на кожен пуш. Підхід (path filters, git-sha теги, needs: між джобами,
+smoke-test) переноситься на ECS-пайплайн нижче без змін по суті.
+
+## Крок 3 — Terraform → ECR + ECS Fargate + RDS
+
+Рішення:
+- **Fargate**, не EC2 launch type — не дублюємо ручне керування EC2 з Кроку 2
+- **Тільки публічні сабнети, без NAT Gateway** — найдорожчий елемент
+  інфраструктури, ізоляція йде через Security Groups, не мережеву топологію
+- **Файли по темах, без Terraform-модулів** — простіше орієнтуватись на
+  етапі навчання
+- **Remote state в S3 + DynamoDB lock** — bootstrap (`infra/bootstrap/`)
+  створює бакет і таблицю окремо, з локальним стейтом (курка/яйце: бакет
+  має існувати до того, як основний проєкт зможе туди писати стан)
+- **IAM: окремий non-root користувач** (`terraform-deployer`), не root-акаунт
+
+Файли (`infra/`): `versions.tf`, `providers.tf`, `variables.tf`,
+`backend.tf` (S3), `vpc.tf` (VPC + 2 публічні сабнети в різних AZ, IGW,
+route table), `security-groups.tf` (ALB ← інтернет, ECS ← тільки ALB,
+RDS ← тільки ECS), `ecr.tf` (2 репозиторії, IMMUTABLE теги), `secrets.tf`
+(`random_password` → Secrets Manager, 2 секрети: сам пароль і повний
+`DATABASE_URL`), `rds.tf` (Postgres, `publicly_accessible = false`,
+`skip_final_snapshot = true` для навчального стенду), `iam.tf`
+(execution role — pull/logs/secrets; task role — порожня, для майбутнього
+розширення), `alb.tf` (Target Groups з `target_type = "ip"` для Fargate,
+path-based routing: `/api/*` → backend, решта → frontend), `ecs.tf`
+(кластер, CloudWatch log groups, task definitions, сервіси;
+`lifecycle { ignore_changes = [task_definition] }` — щоб Terraform не
+відкочував деплої, зроблені CI).
+
+## Крок 4 — CI/CD → ECS
+
+`.github/workflows/backend-ecs.yml` / `frontend-ecs.yml`:
+build → push в ECR (тег git-sha) → `describe-task-definition` поточної
+ревізії → патч тільки `image` через `jq` → `register-task-definition`
+(нова ревізія) → `update-service --force-new-deployment` →
+`ecs wait services-stable` (це і smoke-test, і механізм "не задеплоїти
+зламану версію" — якщо нові задачі не стануть healthy в ALB, wait
+падає з таймаутом, workflow червоний).
+
+Потрібні GitHub Secrets: `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`
+(зараз — ключі `terraform-deployer`; це тимчасовий компроміс — керований
+CI-користувач з вужчими правами або OIDC без довгоживучих ключів
+заплановані в Кроці 6).
+
+## Rollback (ECS)
+
+ECS зберігає **всі** попередні ревізії task definition — жодна не
+видаляється автоматично при новому деплої. Відкат:
 
 ```bash
-docker compose down -v   # -v видаляє volume з даними БД
+# 1. Знайти попередню робочу ревізію
+aws ecs list-task-definitions --family-prefix devops-task-backend --sort DESC
+
+# 2. Переключити сервіс на неї
+aws ecs update-service \
+  --cluster devops-task-cluster \
+  --service devops-task-backend \
+  --task-definition devops-task-backend:<номер-попередньої-ревізії> \
+  --force-new-deployment
+
+# 3. Дочекатись стабілізації (як і в CI)
+aws ecs wait services-stable --cluster devops-task-cluster --services devops-task-backend
 ```
 
----
+Аналогічно для `devops-task-frontend`. Номер ревізії також видно в
+GitHub Actions логах кожного попереднього деплою (крок "Register new
+task definition revision").
 
-# Крок 2: CI/CD → EC2
+## Знесення інфраструктури
 
-## Як влаштований пайплайн
-
-Два незалежні GitHub Actions workflow:
-
-- `.github/workflows/backend.yml` — тригериться тільки на `push` у `main` зі
-  змінами в `backend/**`
-- `.github/workflows/frontend.yml` — тільки на зміни в `frontend/**`
-
-Кожен: `build-and-push` (job 1) → `deploy` (job 2, `needs: build-and-push`).
-
-- Образ будується і пушиться в **GitHub Container Registry** (`ghcr.io`),
-  тег — короткий git-sha (`git rev-parse --short HEAD`), ніякого `latest`.
-- Якщо збірка образу падає (зламаний Dockerfile/код) — job `build-and-push`
-  падає, і job `deploy` не запускається взагалі (`needs:`). Зламана версія
-  ніколи не потрапляє на прод.
-- Деплой = SSH на EC2 → оновити тег образу в `.env` → `docker compose pull`
-  + `up -d` **тільки** для зміненого сервіса → smoke-test (`curl /health`
-  або `curl /`). Якщо smoke-test не пройшов — workflow червоний.
-- Це одночасно закриває критерій «фронт не перезбирає бек і навпаки»
-  (`paths` filter) і «падає, якщо збірка зламана» (`needs` між джобами).
-
-## Одноразова підготовка EC2
-
-1. Підняти EC2-інстанс (Варіант 2 із завдання — Terraform для цього буде
-   на Кроці 3; поки що можна руками через консоль/CLI).
-2. Security Group: відкрити 22 (SSH, бажано лише зі свого IP), 80, 5000.
-3. Зайти на інстанс і виконати `scripts/setup-ec2.sh` (ставить Docker +
-   Compose plugin, готує `/opt/devops-app`).
-4. Скопіювати `.env.prod.example` → `/opt/devops-app/.env` на сервері,
-   підставити реальний `BACKEND_IMAGE_NAME` / `FRONTEND_IMAGE_NAME`
-   (`ghcr.io/<owner>/devops-task-backend` тощо) і пароль БД.
-5. У GitHub repo → Settings → Secrets and variables → Actions додати:
-   - `EC2_HOST` — публічний IP/DNS інстанса
-   - `EC2_USER` — користувач для SSH (напр. `ec2-user` / `ubuntu`)
-   - `EC2_SSH_KEY` — приватний ключ (весь вміст `.pem`)
-   - `GITHUB_TOKEN` створюється автоматично, вручну не потрібен
-
-## Секрети — де що лежить зараз
-
-- Пароль БД і теги образів — у `.env` **на сервері**, не в git
-  (`.gitignore` виключає `.env`).
-- SSH-ключ і хост — у GitHub Secrets, не в коді.
-- Це проміжний стан для EC2-варіанта. На Кроці 5 (AWS Secrets Manager /
-  SSM) пароль БД піде під `random_password` у Terraform + Secrets
-  Manager, а контейнер отримає його в рантаймі — без `.env`-файлу на диску.
-
-## Відкат / rollback
-
-Образи в GHCR не видаляються при новому пуші — попередні git-sha теги
-залишаються доступними. Відкат:
+**Порядок важливий** — спершу основна інфраструктура, бо вона залежить
+від bootstrap (S3/DynamoDB), не навпаки:
 
 ```bash
-ssh <user>@<ec2-host>
-cd /opt/devops-app
-sed -i "s|^BACKEND_IMAGE_TAG=.*|BACKEND_IMAGE_TAG=<попередній-sha>|" .env
-docker compose -f docker-compose.prod.yml pull backend
-docker compose -f docker-compose.prod.yml up -d backend
+cd infra
+terraform destroy
 ```
 
-Аналогічно для `frontend`. Попередній sha можна знайти в історії Actions
-runs (кожен run логує, який тег він задеплоїв) або в GHCR package versions.
+Підтверди `yes`. Знесе VPC, ECS, RDS (без фінального снепшоту —
+`skip_final_snapshot = true`), ALB, ECR (разом з образами всередині),
+Secrets Manager секрети, IAM-ролі — усе, чим керує `infra/`.
 
-## Наступні кроки (за планом завдання)
+Потім, **окремо**, bootstrap (тільки якщо проєкт закривається зовсім —
+без цього бакета `infra/` більше нікуди не зможе писати стан):
 
-1. ~~Застосунок локально через docker compose~~ ✅
-2. ~~CI/CD → деплой на EC2 з пайплайну~~ ✅
-3. Terraform — описати те, що підняли руками (EC2, SG, .env через
-   Secrets Manager замість файлу на диску)
-4. Варіант 3: ECR + ECS + RDS
-5. Секрети (Secrets Manager/SSM повністю), моніторинг (Prometheus/Grafana)
-6. Домен, HTTPS, ALB, GitHub OIDC (замінити довгоживучий SSH-ключ)
+```bash
+cd infra/bootstrap
+terraform destroy
+```
+
+⚠️ Перед цим переконайся, що `infra/destroy` вище **успішно завершився**
+— якщо знести bootstrap першим, `infra/` втратить доступ до свого
+стану і подальше `destroy` там стане значно складнішим.
+
+Локальні ресурси (Docker-контейнери, образи, volumes) з Кроку 1:
+```bash
+docker compose down -v
+```
+
+## Моніторинг (CloudWatch Container Insights + Grafana)
+
+Рішення: не self-hosted Prometheus/cAdvisor — у Fargate немає доступного
+хоста для встановлення таких агентів (це і є суть Fargate). Замість
+цього: **Container Insights** (вбудований у ECS механізм збору
+CPU/RAM/мережі по кожному сервісу в CloudWatch) + **Grafana локально**
+з CloudWatch datasource. Дешевше і простіше за розгортання Prometheus
++ cloudwatch_exporter як окремих Fargate-сервісів, які коштували б
+цілодобово.
+
+Grafana працює **локально**, не в AWS — немає сенсу платити за
+цілодобово запущений сервіс лише для перегляду дашборда.
+
+```bash
+docker run -d -p 3001:3000 --name grafana grafana/grafana
+```
+
+Відкрий http://localhost:3001 (логін/пароль за замовчуванням `admin`/`admin`).
+
+**Дані для datasource** (одноразово, з Terraform):
+```bash
+cd infra
+terraform output grafana_cloudwatch_access_key_id
+terraform output -raw grafana_cloudwatch_secret_access_key
+```
+
+У Grafana: Connections → Data sources → Add → **CloudWatch** →
+Authentication Provider: `Access & secret key` → встав значення вище,
+Default Region: `eu-central-1` → Save & Test.
+
+**Дашборд:** Dashboards → New → Import → ID `551` ("AWS ECS",
+Grafana Labs) → обери щойно доданий CloudWatch datasource → Import.
+
+## Наступні кроки за планом завдання
+
+1. ~~Локально через docker compose~~ ✅
+2. ~~CI/CD → EC2~~ ✅ (замінено ECS)
+3. ~~Terraform: VPC/SG/ECR/RDS/IAM/ALB/ECS~~ ✅
+4. ~~CI/CD → ECS~~ ✅
+5. ~~Моніторинг (CloudWatch Container Insights + Grafana локально)~~ ✅
+6. Домен, HTTPS, GitHub OIDC (замінити довгоживучі AWS ключі в CI)
