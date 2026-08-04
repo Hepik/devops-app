@@ -27,3 +27,14 @@ variable "frontend_image_tag" {
   type        = string
   default     = "initial"
 }
+
+variable "domain_name" {
+  description = "Your registered domain (e.g. example.com). No default on purpose — set this in terraform.tfvars, which is gitignored, so your real domain never ends up committed."
+  type        = string
+}
+
+variable "subdomain" {
+  description = "Subdomain the app will be served on (full host = subdomain.domain_name)"
+  type        = string
+  default     = "devops-task"
+}

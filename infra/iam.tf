@@ -51,3 +51,38 @@ resource "aws_iam_role" "ecs_task" {
   name               = "${var.project_name}-ecs-task-role"
   assume_role_policy = data.aws_iam_policy_document.ecs_assume_role.json
 }
+
+# --- Grafana's CloudWatch datasource: read-only, nothing else ---
+# Deliberately NOT reusing terraform-deployer here — that user can create/
+# destroy all of AWS. Grafana only ever needs to READ metric data, so it
+# gets its own narrow user, same principle as the ECS execution role's
+# secrets policy above (scoped to exactly what's needed, nothing more).
+resource "aws_iam_user" "grafana_readonly" {
+  name = "${var.project_name}-grafana-readonly"
+}
+
+data "aws_iam_policy_document" "grafana_cloudwatch_read" {
+  statement {
+    actions = [
+      "cloudwatch:GetMetricData",
+      "cloudwatch:GetMetricStatistics",
+      "cloudwatch:ListMetrics",
+      "cloudwatch:DescribeAlarmsForMetric",
+      "tag:GetResources", # the CloudWatch datasource uses this for tag-based filtering in the UI
+    ]
+    resources = ["*"] # CloudWatch read actions don't support resource-level scoping — this IS the least-privilege ceiling here
+  }
+}
+
+resource "aws_iam_user_policy" "grafana_cloudwatch_read" {
+  name   = "${var.project_name}-grafana-cloudwatch-read"
+  user   = aws_iam_user.grafana_readonly.name
+  policy = data.aws_iam_policy_document.grafana_cloudwatch_read.json
+}
+
+# Programmatic keys for Grafana to authenticate with — retrieved once via
+# `terraform output`, pasted into Grafana's datasource config, never
+# committed anywhere.
+resource "aws_iam_access_key" "grafana_readonly" {
+  user = aws_iam_user.grafana_readonly.name
+}

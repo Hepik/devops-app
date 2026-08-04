@@ -30,5 +30,10 @@ resource "aws_secretsmanager_secret" "database_url" {
 
 resource "aws_secretsmanager_secret_version" "database_url" {
   secret_id = aws_secretsmanager_secret.database_url.id
-  secret_string = "postgres://${aws_db_instance.main.username}:${random_password.rds_password.result}@${aws_db_instance.main.address}:5432/${aws_db_instance.main.db_name}"
+  # urlencode() is essential here: override_special above includes characters
+  # like # % & = + : ? that are syntactically meaningful in a URL. Without
+  # encoding, a generated password containing one of these would corrupt
+  # the connection string and the backend would fail to parse/connect —
+  # exactly the crash loop we hit before finding this.
+  secret_string = "postgres://${aws_db_instance.main.username}:${urlencode(random_password.rds_password.result)}@${aws_db_instance.main.address}:5432/${aws_db_instance.main.db_name}"
 }

@@ -1,0 +1,6 @@
+# Copy this file to terraform.tfvars (already in .gitignore) and fill in
+# your real domain. terraform.tfvars is picked up automatically by
+# terraform plan/apply — no extra flags needed.
+
+domain_name = "animeonix.win"
+subdomain   = "devops-task"

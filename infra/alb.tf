@@ -45,19 +45,42 @@ resource "aws_lb_listener" "http" {
   port              = 80
   protocol          = "HTTP"
 
-  # Default action = catch-all for anything not matched by a more specific
-  # rule below. Everything that ISN'T /api/* ends up here — the frontend.
+  # HTTP no longer serves traffic directly — it only redirects to HTTPS.
+  # All the actual routing logic (frontend default + /api/* rule) lives
+  # on the HTTPS listener below.
+  default_action {
+    type = "redirect"
+
+    redirect {
+      protocol    = "HTTPS"
+      port        = "443"
+      status_code = "HTTP_301"
+    }
+  }
+}
+
+resource "aws_lb_listener" "https" {
+  load_balancer_arn = aws_lb.main.arn
+  port              = 443
+  protocol          = "HTTPS"
+
+  # Only becomes valid once DNS validation completes (see dns.tf) — this
+  # listener can't be created until aws_acm_certificate_validation.main
+  # finishes, which is exactly the dependency we want: no HTTPS listener
+  # with a half-validated certificate.
+  certificate_arn = aws_acm_certificate_validation.main.certificate_arn
+  ssl_policy       = "ELBSecurityPolicy-TLS13-1-2-2021-06"
+
   default_action {
     type             = "forward"
     target_group_arn = aws_lb_target_group.frontend.arn
   }
 }
 
-# More specific than the listener's default action, so this wins for any
-# request path starting with /api/ — sent straight to the backend, never
-# touching the frontend container at all.
+# Same routing rule as before, just now attached to the HTTPS listener —
+# HTTP traffic never reaches this point, it's already been redirected.
 resource "aws_lb_listener_rule" "api" {
-  listener_arn = aws_lb_listener.http.arn
+  listener_arn = aws_lb_listener.https.arn
   priority     = 100
 
   action {

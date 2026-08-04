@@ -1,5 +1,14 @@
 resource "aws_ecs_cluster" "main" {
   name = "${var.project_name}-cluster"
+
+  # Without this, ECS only reports minimal cluster-level metrics.
+  # Container Insights adds per-service CPU/Memory/Network metrics to
+  # CloudWatch (namespace ECS/ContainerInsights) — this is what the
+  # Grafana dashboard below actually reads from.
+  setting {
+    name  = "containerInsights"
+    value = "enabled"
+  }
 }
 
 # Log retention set explicitly — without it, CloudWatch keeps logs forever
